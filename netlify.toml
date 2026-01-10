@@ -4,7 +4,7 @@
   # requires lightningcss's platform package (Linux) which is an optional dep.
   # Running `npm ci --include=optional` isn't always enough with a lockfile created on macOS,
   # so we explicitly install the Linux binding right before build.
-  command = "npm ci --include=optional --no-audit --no-fund && npm install --no-save lightningcss-linux-x64-gnu@1.30.2 && npm run build"
+  command = "npm ci --include=optional --no-audit --no-fund && npm install --no-save lightningcss-linux-x64-gnu@1.30.2 @tailwindcss/oxide-linux-x64-gnu@4.1.17 && npm run build"
   publish = ".next"
 
 [[plugins]]
