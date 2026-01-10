@@ -181,6 +181,7 @@ export function RunWizard() {
   const lastPollSigRef = useRef<string | null>(null);
   const [showErrorLightbox, setShowErrorLightbox] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const convertFakeProgressTimerRef = useRef<number | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -254,6 +255,11 @@ export function RunWizard() {
     if (autoUploadTimerRef.current) {
       window.clearTimeout(autoUploadTimerRef.current);
       autoUploadTimerRef.current = null;
+    }
+
+    if (convertFakeProgressTimerRef.current) {
+      window.clearInterval(convertFakeProgressTimerRef.current);
+      convertFakeProgressTimerRef.current = null;
     }
 
     if (fileInputRef.current) {
@@ -336,6 +342,28 @@ export function RunWizard() {
 
     let newRunId: string | null = null;
     console.log(`[API Call] POST /api/runs - Starting conversion for uploadId: ${uploadId}`);
+
+    // Netlify/serverless may run the conversion *inline* inside this POST.
+    // To keep UX responsive, animate a lightweight local progress while the request is pending.
+    if (convertFakeProgressTimerRef.current) {
+      window.clearInterval(convertFakeProgressTimerRef.current);
+      convertFakeProgressTimerRef.current = null;
+    }
+    convertFakeProgressTimerRef.current = window.setInterval(() => {
+      setRunStatus((prev) => {
+        if (!prev) return prev;
+        if (prev.status === "completed" || prev.status === "failed") return prev;
+        const cur = Math.max(0, Math.min(100, prev.progress ?? 0));
+        if (cur >= 85) return { ...prev, status: "running", progress: cur };
+        const bump = cur < 10 ? 3 : cur < 35 ? 2 : 1;
+        return {
+          ...prev,
+          status: "running",
+          progress: Math.min(85, cur + bump),
+          message: prev.message || "Working...",
+        };
+      });
+    }, 450);
     try {
       const resp = await fetch("/api/runs", {
         method: "POST",
@@ -389,6 +417,11 @@ export function RunWizard() {
       setErrorMessage(errorMsg);
       setShowErrorLightbox(true);
       return;
+    } finally {
+      if (convertFakeProgressTimerRef.current) {
+        window.clearInterval(convertFakeProgressTimerRef.current);
+        convertFakeProgressTimerRef.current = null;
+      }
     }
 
     if (!newRunId) {
@@ -431,6 +464,10 @@ export function RunWizard() {
 
         if (s.status === "completed") {
           console.log(`[API Call] GET /api/runs/${newRunId} - Status: completed`);
+          if (convertFakeProgressTimerRef.current) {
+            window.clearInterval(convertFakeProgressTimerRef.current);
+            convertFakeProgressTimerRef.current = null;
+          }
           setStep("done");
           return;
         }
@@ -439,6 +476,10 @@ export function RunWizard() {
           console.error(`[API Call] GET /api/runs/${newRunId} - Status: failed - Error: ${errorMsg}`);
           if ("debugError" in s && s.debugError) {
             console.error(`[API Call] GET /api/runs/${newRunId} - DebugError:`, s.debugError);
+          }
+          if (convertFakeProgressTimerRef.current) {
+            window.clearInterval(convertFakeProgressTimerRef.current);
+            convertFakeProgressTimerRef.current = null;
           }
           setErrorMessage(errorMsg);
           setShowErrorLightbox(true);
@@ -452,6 +493,10 @@ export function RunWizard() {
           progress: 0,
           error: errorMsg,
         });
+        if (convertFakeProgressTimerRef.current) {
+          window.clearInterval(convertFakeProgressTimerRef.current);
+          convertFakeProgressTimerRef.current = null;
+        }
         setErrorMessage(errorMsg);
         setShowErrorLightbox(true);
         return;
