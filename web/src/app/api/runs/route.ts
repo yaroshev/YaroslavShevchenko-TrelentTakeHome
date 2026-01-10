@@ -2,10 +2,18 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import { ensureDir, getRunsDir, getUploadsDir } from "@/server/storage";
 import { writeRunState } from "@/server/run-store";
-import { ensureWorkerStarted } from "@/server/worker";
+import { ensureWorkerStarted, processQueuedRun } from "@/server/worker";
 import { createLogger, errorToObject } from "@/server/logger";
 
 export const runtime = "nodejs";
+
+function isServerlessRuntime() {
+  return (
+    process.env.NETLIFY === "true" ||
+    process.env.VERCEL === "1" ||
+    typeof process.env.AWS_LAMBDA_FUNCTION_NAME === "string"
+  );
+}
 
 export async function POST(req: Request) {
   const log = createLogger("api.runs.create");
@@ -43,6 +51,13 @@ export async function POST(req: Request) {
 
     log.info("run queued", { runId, uploadId });
     ensureWorkerStarted();
+
+    // In serverless, background work after returning a response is not reliable.
+    // Run the job inline so the user gets a deterministic outcome.
+    if (isServerlessRuntime()) {
+      log.info("serverless: processing run inline", { runId, uploadId });
+      await processQueuedRun(runId);
+    }
 
     return Response.json({ runId });
   } catch (e) {

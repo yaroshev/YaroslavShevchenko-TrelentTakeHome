@@ -7,6 +7,14 @@ let workerStarted = false;
 let workerLoopPromise: Promise<void> | null = null;
 const log = createLogger("worker");
 
+function isServerlessRuntime() {
+  return (
+    process.env.NETLIFY === "true" ||
+    process.env.VERCEL === "1" ||
+    typeof process.env.AWS_LAMBDA_FUNCTION_NAME === "string"
+  );
+}
+
 async function sleep(ms: number) {
   await new Promise((r) => setTimeout(r, ms));
 }
@@ -93,6 +101,10 @@ async function processRun(runId: string) {
   }
 }
 
+export async function processQueuedRun(runId: string) {
+  await processRun(runId);
+}
+
 async function workerLoop() {
   // Single-process, single-worker loop. For scale: move this to a dedicated worker + queue.
   log.info("workerLoop: started");
@@ -111,6 +123,10 @@ async function workerLoop() {
 export function ensureWorkerStarted() {
   if (workerStarted) return;
   workerStarted = true;
+  if (isServerlessRuntime()) {
+    log.info("ensureWorkerStarted: serverless runtime detected; skipping background loop");
+    return;
+  }
   log.info("ensureWorkerStarted: starting background loop");
   // Fire and forget.
   workerLoopPromise = workerLoop();

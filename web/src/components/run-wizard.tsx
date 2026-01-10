@@ -173,6 +173,7 @@ export function RunWizard() {
   const [uploadId, setUploadId] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const uploadedSignatureRef = useRef<string | null>(null);
+  const lastUploadAttemptSignatureRef = useRef<string | null>(null);
   const autoUploadTimerRef = useRef<number | null>(null);
 
   const [runId, setRunId] = useState<string | null>(null);
@@ -220,6 +221,15 @@ export function RunWizard() {
     [picked]
   );
 
+  const pickedSignature = useMemo(
+    () =>
+      picked
+        .map((f) => `${f.relativePath}:${f.file.size}:${f.file.lastModified}`)
+        .sort()
+        .join("|"),
+    [picked]
+  );
+
   const canConvert = !!uploadId && !isUploading;
 
   const resetWizard = useCallback(() => {
@@ -232,6 +242,7 @@ export function RunWizard() {
     setUploadId(null);
     setUploadError(null);
     uploadedSignatureRef.current = null;
+    lastUploadAttemptSignatureRef.current = null;
     lastPollSigRef.current = null;
 
     setRunId(null);
@@ -255,6 +266,7 @@ export function RunWizard() {
     setUploadPct(0);
     setIsUploading(false);
     uploadedSignatureRef.current = null;
+    lastUploadAttemptSignatureRef.current = null;
   }, []);
 
   const mergePicked = useCallback(
@@ -295,6 +307,7 @@ export function RunWizard() {
     setIsUploading(true);
     setUploadPct(0);
     setUploadError(null);
+    lastUploadAttemptSignatureRef.current = pickedSignature;
     try {
       console.info("[RunWizard] upload: start", {
         count: picked.length,
@@ -304,10 +317,7 @@ export function RunWizard() {
       setUploadId(res.uploadId);
       setUploadPct(100);
       console.info("[RunWizard] upload: complete", { uploadId: res.uploadId, files: res.files });
-      uploadedSignatureRef.current = picked
-        .map((f) => `${f.relativePath}:${f.file.size}:${f.file.lastModified}`)
-        .sort()
-        .join("|");
+      uploadedSignatureRef.current = pickedSignature;
     } catch (e) {
       console.error("[RunWizard] upload: failed", e);
       setUploadError(e instanceof Error ? e.message : "Upload failed");
@@ -315,7 +325,7 @@ export function RunWizard() {
     } finally {
       setIsUploading(false);
     }
-  }, [picked]);
+  }, [picked, pickedSignature]);
 
   const startConvert = useCallback(async () => {
     if (!uploadId) return;
@@ -507,13 +517,18 @@ export function RunWizard() {
       return;
     }
 
-    const signature = picked
-      .map((f) => `${f.relativePath}:${f.file.size}:${f.file.lastModified}`)
-      .sort()
-      .join("|");
-
-    if (uploadedSignatureRef.current === signature && uploadId) return;
+    if (uploadedSignatureRef.current === pickedSignature && uploadId) return;
     if (isUploading) return;
+
+    // If an upload already failed for this exact selection, don't auto-retry forever.
+    // Let the user explicitly click Retry (or change the selection).
+    if (
+      uploadError &&
+      lastUploadAttemptSignatureRef.current === pickedSignature &&
+      !uploadId
+    ) {
+      return;
+    }
 
     // Selection changed; force a new upload.
     if (uploadId) setUploadId(null);
@@ -533,7 +548,7 @@ export function RunWizard() {
         autoUploadTimerRef.current = null;
       }
     };
-  }, [picked, uploadId, isUploading, invalidateUpload, startUpload]);
+  }, [picked, pickedSignature, uploadId, isUploading, uploadError, invalidateUpload, startUpload]);
 
   // On the final step, load the server log for reviewer debugging.
   useEffect(() => {
@@ -663,8 +678,15 @@ export function RunWizard() {
                 )}
 
                 {uploadError && (
-                  <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-                    {uploadError}
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                    <div className="min-w-0">{uploadError}</div>
+                    <button
+                      type="button"
+                      onClick={() => void startUpload()}
+                      className="shrink-0 rounded-md border border-destructive/40 bg-background px-2 py-1 text-xs text-destructive hover:bg-destructive/5"
+                    >
+                      Retry upload
+                    </button>
                   </div>
                 )}
 
