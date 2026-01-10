@@ -1,5 +1,6 @@
 import { listRuns, readRunState, writeRunState } from "@/server/run-store";
 import { createLogger, errorToObject } from "@/server/logger";
+import type { PipelineProgressUpdate } from "@/server/pipeline";
 
 const PUBLIC_RUN_ERROR = "Something went wrong please contact support or retry";
 
@@ -32,7 +33,10 @@ async function findNextQueuedRun(): Promise<string | null> {
   return null;
 }
 
-async function processRun(runId: string) {
+async function processRun(
+  runId: string,
+  opts?: { onProgress?: (u: PipelineProgressUpdate) => void | Promise<void> }
+) {
   const state = await readRunState(runId);
   if (state.status !== "queued") return;
 
@@ -70,6 +74,15 @@ async function processRun(runId: string) {
             : cur.current,
         updatedAt: new Date().toISOString(),
       });
+
+      if (opts?.onProgress) {
+        try {
+          await opts.onProgress(u);
+        } catch (e) {
+          // Don't fail the run if a progress observer fails (e.g. client disconnected).
+          log.warn("processRun: progress observer failed", { error: errorToObject(e) });
+        }
+      }
     });
 
     await writeRunState({
@@ -101,8 +114,11 @@ async function processRun(runId: string) {
   }
 }
 
-export async function processQueuedRun(runId: string) {
-  await processRun(runId);
+export async function processQueuedRun(
+  runId: string,
+  opts?: { onProgress?: (u: PipelineProgressUpdate) => void | Promise<void> }
+) {
+  await processRun(runId, opts);
 }
 
 async function workerLoop() {

@@ -181,7 +181,6 @@ export function RunWizard() {
   const lastPollSigRef = useRef<string | null>(null);
   const [showErrorLightbox, setShowErrorLightbox] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const convertFakeProgressTimerRef = useRef<number | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -255,11 +254,6 @@ export function RunWizard() {
     if (autoUploadTimerRef.current) {
       window.clearTimeout(autoUploadTimerRef.current);
       autoUploadTimerRef.current = null;
-    }
-
-    if (convertFakeProgressTimerRef.current) {
-      window.clearInterval(convertFakeProgressTimerRef.current);
-      convertFakeProgressTimerRef.current = null;
     }
 
     if (fileInputRef.current) {
@@ -342,34 +336,112 @@ export function RunWizard() {
 
     let newRunId: string | null = null;
     console.log(`[API Call] POST /api/runs - Starting conversion for uploadId: ${uploadId}`);
-
-    // Netlify/serverless may run the conversion *inline* inside this POST.
-    // To keep UX responsive, animate a lightweight local progress while the request is pending.
-    if (convertFakeProgressTimerRef.current) {
-      window.clearInterval(convertFakeProgressTimerRef.current);
-      convertFakeProgressTimerRef.current = null;
-    }
-    convertFakeProgressTimerRef.current = window.setInterval(() => {
-      setRunStatus((prev) => {
-        if (!prev) return prev;
-        if (prev.status === "completed" || prev.status === "failed") return prev;
-        const cur = Math.max(0, Math.min(100, prev.progress ?? 0));
-        if (cur >= 85) return { ...prev, status: "running", progress: cur };
-        const bump = cur < 10 ? 3 : cur < 35 ? 2 : 1;
-        return {
-          ...prev,
-          status: "running",
-          progress: Math.min(85, cur + bump),
-          message: prev.message || "Working...",
-        };
-      });
-    }, 450);
     try {
       const resp = await fetch("/api/runs", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          accept: "application/x-ndjson, application/json",
+          "content-type": "application/json",
+        },
         body: JSON.stringify({ uploadId }),
       });
+      const contentType = resp.headers.get("content-type") || "";
+
+      // Server can stream NDJSON progress (used in serverless environments like Netlify).
+      if (resp.ok && contentType.includes("application/x-ndjson")) {
+        if (!resp.body) throw new Error("Missing response body");
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        const handleEvent = (evt: unknown) => {
+          const t = (evt as { type?: unknown } | null)?.type;
+          if (t === "runId") {
+            const id = (evt as { runId?: unknown }).runId;
+            if (typeof id === "string") {
+              newRunId = id;
+              setRunId(id);
+            }
+            return;
+          }
+          if (t === "status") {
+            const e = evt as {
+              status?: "queued" | "running";
+              progress?: number;
+              message?: string;
+              current?: { file?: string; index?: number; total?: number };
+            };
+            if (e.status && typeof e.progress === "number") {
+              setRunStatus({
+                status: e.status,
+                progress: e.progress,
+                message: e.message,
+                current: e.current,
+              });
+            }
+            return;
+          }
+          if (t === "completed") {
+            const id = (evt as { runId?: unknown }).runId;
+            if (typeof id === "string") {
+              newRunId = id;
+              setRunId(id);
+              setRunStatus({
+                status: "completed",
+                progress: 100,
+                downloadUrl: `/api/runs/${encodeURIComponent(id)}/download`,
+              });
+              setStep("done");
+            } else {
+              setRunStatus({
+                status: "completed",
+                progress: 100,
+                downloadUrl: `/api/runs/${encodeURIComponent(newRunId || "")}/download`,
+              });
+              setStep("done");
+            }
+            return;
+          }
+          if (t === "failed") {
+            const errorMsg =
+              typeof (evt as { error?: unknown } | null)?.error === "string"
+                ? (evt as { error: string }).error
+                : "Failed to start conversion";
+            setRunStatus({ status: "failed", progress: 0, error: errorMsg });
+            setErrorMessage(errorMsg);
+            setShowErrorLightbox(true);
+            return;
+          }
+        };
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            try {
+              handleEvent(JSON.parse(trimmed) as unknown);
+            } catch (e) {
+              console.warn("[RunWizard] convert: failed to parse NDJSON line", { line, e });
+            }
+          }
+        }
+
+        // If the stream ends without an explicit completion/failure, fall back to polling once.
+        if (!newRunId) {
+          const errorMsg = "Invalid response from server";
+          setRunStatus({ status: "failed", progress: 0, error: errorMsg });
+          setErrorMessage(errorMsg);
+          setShowErrorLightbox(true);
+        }
+        return;
+      }
+
       const body: unknown = await resp.json().catch(() => null);
       if (!resp.ok) {
         const errorMsg =
@@ -417,11 +489,6 @@ export function RunWizard() {
       setErrorMessage(errorMsg);
       setShowErrorLightbox(true);
       return;
-    } finally {
-      if (convertFakeProgressTimerRef.current) {
-        window.clearInterval(convertFakeProgressTimerRef.current);
-        convertFakeProgressTimerRef.current = null;
-      }
     }
 
     if (!newRunId) {
@@ -464,10 +531,6 @@ export function RunWizard() {
 
         if (s.status === "completed") {
           console.log(`[API Call] GET /api/runs/${newRunId} - Status: completed`);
-          if (convertFakeProgressTimerRef.current) {
-            window.clearInterval(convertFakeProgressTimerRef.current);
-            convertFakeProgressTimerRef.current = null;
-          }
           setStep("done");
           return;
         }
@@ -476,10 +539,6 @@ export function RunWizard() {
           console.error(`[API Call] GET /api/runs/${newRunId} - Status: failed - Error: ${errorMsg}`);
           if ("debugError" in s && s.debugError) {
             console.error(`[API Call] GET /api/runs/${newRunId} - DebugError:`, s.debugError);
-          }
-          if (convertFakeProgressTimerRef.current) {
-            window.clearInterval(convertFakeProgressTimerRef.current);
-            convertFakeProgressTimerRef.current = null;
           }
           setErrorMessage(errorMsg);
           setShowErrorLightbox(true);
@@ -493,10 +552,6 @@ export function RunWizard() {
           progress: 0,
           error: errorMsg,
         });
-        if (convertFakeProgressTimerRef.current) {
-          window.clearInterval(convertFakeProgressTimerRef.current);
-          convertFakeProgressTimerRef.current = null;
-        }
         setErrorMessage(errorMsg);
         setShowErrorLightbox(true);
         return;
