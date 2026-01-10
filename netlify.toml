@@ -8,4 +8,8 @@
 
 [build.environment]
   NODE_VERSION = "20"
+  # Netlify sometimes installs with `--omit=optional` which breaks Tailwind v4's
+  # lightningcss native bindings. Force optional deps to be included.
+  NPM_FLAGS = "--include=optional"
+  NPM_CONFIG_OPTIONAL = "true"
 
