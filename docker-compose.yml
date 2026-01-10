@@ -1,0 +1,14 @@
+services:
+  web:
+    build:
+      context: ./web
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./web/.env.local
+    volumes:
+      - web-data:/app/.data
+
+volumes:
+  web-data:
+

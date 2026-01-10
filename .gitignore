@@ -1,0 +1,26 @@
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Dependencies
+**/node_modules/
+
+# Next.js build output
+**/.next/
+**/out/
+**/build/
+
+# Local runtime artifacts
+**/.data/
+**/.vercel/
+
+# Logs
+**/*.log
+
+# Env files (never commit real secrets)
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.*.example
+

@@ -1,0 +1,1 @@
+Please place any prototyping scripts here. If you use python, please use [`uv`](https://docs.astral.sh/uv/getting-started/installation/) for your package manager and project setup utility (eg. `uv init`).
