@@ -496,16 +496,18 @@ export function RunWizard() {
       return;
     }
 
+    const runIdForPoll = newRunId;
+
     let cancelled = false;
     const poll = async () => {
       if (cancelled) return;
       try {
-        console.log(`[API Call] GET /api/runs/${newRunId} - Polling status`);
-        const r = await fetch(`/api/runs/${encodeURIComponent(newRunId)}`, {
+        console.log(`[API Call] GET /api/runs/${runIdForPoll} - Polling status`);
+        const r = await fetch(`/api/runs/${encodeURIComponent(runIdForPoll)}`, {
           cache: "no-store",
         });
         if (!r.ok) {
-          console.error(`[API Call] GET /api/runs/${newRunId} - FAILED - Status: ${r.status}`);
+          console.error(`[API Call] GET /api/runs/${runIdForPoll} - FAILED - Status: ${r.status}`);
           setRunStatus({
             status: "failed",
             progress: 0,
@@ -526,19 +528,21 @@ export function RunWizard() {
                 ) || ""}:${("current" in s && s.current?.total) || ""}`;
         if (sig !== lastPollSigRef.current) {
           lastPollSigRef.current = sig;
-          console.info("[RunWizard] convert: status", { runId: newRunId, status: s });
+          console.info("[RunWizard] convert: status", { runId: runIdForPoll, status: s });
         }
 
         if (s.status === "completed") {
-          console.log(`[API Call] GET /api/runs/${newRunId} - Status: completed`);
+          console.log(`[API Call] GET /api/runs/${runIdForPoll} - Status: completed`);
           setStep("done");
           return;
         }
         if (s.status === "failed") {
           const errorMsg = ("error" in s && s.error) || "Unknown error";
-          console.error(`[API Call] GET /api/runs/${newRunId} - Status: failed - Error: ${errorMsg}`);
+          console.error(
+            `[API Call] GET /api/runs/${runIdForPoll} - Status: failed - Error: ${errorMsg}`
+          );
           if ("debugError" in s && s.debugError) {
-            console.error(`[API Call] GET /api/runs/${newRunId} - DebugError:`, s.debugError);
+            console.error(`[API Call] GET /api/runs/${runIdForPoll} - DebugError:`, s.debugError);
           }
           setErrorMessage(errorMsg);
           setShowErrorLightbox(true);
@@ -546,7 +550,10 @@ export function RunWizard() {
         }
       } catch (e) {
         const errorMsg = "Something went wrong please contact support or retry";
-        console.error(`[API Call] GET /api/runs/${newRunId} - FAILED - Exception: ${e instanceof Error ? e.message : String(e)}`, e);
+        console.error(
+          `[API Call] GET /api/runs/${runIdForPoll} - FAILED - Exception: ${e instanceof Error ? e.message : String(e)}`,
+          e
+        );
         setRunStatus({
           status: "failed",
           progress: 0,
