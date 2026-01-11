@@ -2,16 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 export function getDataDir() {
-  /**
-   * Store run artifacts on local disk.
-   *
-   * IMPORTANT:
-   * - In traditional servers, `process.cwd()` is writable.
-   * - In serverless (Netlify/Vercel/AWS Lambda), the function bundle filesystem is often read-only.
-   *   Use `/tmp` instead (writable but ephemeral).
-   *
-   * In a real production system, we'd swap this to object storage (S3/GCS/etc).
-   */
+  
   if (process.env.DATA_DIR) return process.env.DATA_DIR;
 
   const isServerless =
@@ -19,7 +10,7 @@ export function getDataDir() {
     process.env.VERCEL === "1" ||
     typeof process.env.AWS_LAMBDA_FUNCTION_NAME === "string";
 
-  if (isServerless) return path.join("/tmp", "trelent-conventor-data");
+  if (isServerless) return path.join("/tmp", "trelent-converter-data");
   return path.join(process.cwd(), ".data");
 }
 

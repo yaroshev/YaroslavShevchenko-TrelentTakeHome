@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ErrorLightbox } from "./error-lightbox";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { cn } from "@/lib/utils";
+import { Download, Maximize, Minimize, X } from "lucide-react";
 
 type Step = "upload" | "convert" | "done";
 
@@ -35,6 +37,93 @@ function formatBytes(bytes: number) {
   if (mb < 1024) return `${mb.toFixed(1)} MB`;
   const gb = mb / 1024;
   return `${gb.toFixed(1)} GB`;
+}
+
+type PreviewGuide = {
+  sourcePath: string;
+  outputFile: string;
+  title: string;
+  status: "ok" | "error";
+  error?: string;
+};
+
+type PreviewIndexResponse = {
+  runId: string;
+  uploadId: string;
+  guides: PreviewGuide[];
+};
+
+type HtmlEditMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+type HtmlVersion = {
+  id: string;
+  createdAt: number;
+  label: string;
+  instruction?: string;
+  html: string;
+  source: "original" | "llm";
+};
+
+function escapeHtml(text: string) {
+  return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function wrapPreviewDoc(title: string, fragment: string) {
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${escapeHtml(title)}</title>
+    <style>
+      :root { color-scheme: light; }
+      body {
+        margin: 0;
+        padding: 24px;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji",
+          "Segoe UI Emoji";
+        line-height: 1.55;
+        color: #0f172a;
+        background: #ffffff;
+      }
+      a { color: #2563eb; text-decoration: none; }
+      a:hover { text-decoration: underline; }
+      pre, code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+      pre { padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; overflow: auto; }
+      hr { border: 0; border-top: 1px solid #e2e8f0; margin: 16px 0; }
+      table { border-collapse: collapse; width: 100%; }
+      th, td { border: 1px solid #e2e8f0; padding: 8px; vertical-align: top; }
+      blockquote { margin: 0; padding-left: 12px; border-left: 3px solid #e2e8f0; color: #475569; }
+      img { max-width: 100%; height: auto; }
+      .container { max-width: 960px; margin: 0 auto; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      ${fragment || ""}
+    </div>
+  </body>
+</html>`;
+}
+
+function downloadTextFile(opts: { filename: string; text: string; mime: string }) {
+  const blob = new Blob([opts.text], { type: opts.mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = opts.filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 type WebkitFileWithRelativePath = File & { webkitRelativePath?: string };
@@ -191,6 +280,31 @@ export function RunWizard() {
   const [reviewerLogError, setReviewerLogError] = useState<string | null>(null);
   const [didCopyReviewerLog, setDidCopyReviewerLog] = useState(false);
 
+  const [previewGuides, setPreviewGuides] = useState<PreviewGuide[]>([]);
+  const [previewIndex, setPreviewIndex] = useState<number>(0);
+  const [previewHtml, setPreviewHtml] = useState<string>("");
+  const [previewStatus, setPreviewStatus] = useState<
+    "idle" | "loading-index" | "loading-html" | "ready" | "error"
+  >("idle");
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [isPreviewFullscreen, setIsPreviewFullscreen] = useState(false);
+  const previewFullscreenElRef = useRef<HTMLDivElement | null>(null);
+
+  const [isAiEditOpen, setIsAiEditOpen] = useState(false);
+  const [aiInput, setAiInput] = useState("");
+  const [aiMessages, setAiMessages] = useState<HtmlEditMessage[]>([]);
+  const [isAiApplying, setIsAiApplying] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiProviderPref, setAiProviderPref] = useState<"auto" | "openai" | "gemini">("auto");
+
+  const [htmlVersionsByFile, setHtmlVersionsByFile] = useState<Record<string, HtmlVersion[]>>(
+    {}
+  );
+  const [selectedVersionByFile, setSelectedVersionByFile] = useState<Record<string, string>>(
+    {}
+  );
+  const lastRunIdRef = useRef<string | null>(null);
+
   const copyReviewerLog = useCallback(async () => {
     const text =
       reviewerLog ||
@@ -263,6 +377,16 @@ export function RunWizard() {
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
+
+    setIsAiEditOpen(false);
+    setAiInput("");
+    setAiMessages([]);
+    setAiError(null);
+    setIsAiApplying(false);
+    setAiProviderPref("auto");
+    setHtmlVersionsByFile({});
+    setSelectedVersionByFile({});
+    lastRunIdRef.current = null;
   }, []);
 
   const invalidateUpload = useCallback(() => {
@@ -667,8 +791,256 @@ export function RunWizard() {
     void fetchReviewerLog();
   }, [step, runId, fetchReviewerLog]);
 
+  // On the final step, load preview index (manifest) so we can show an HTML carousel.
+  useEffect(() => {
+    if (step !== "done" || !runId) return;
+    if (runStatus?.status !== "completed") return;
+
+    const controller = new AbortController();
+    setPreviewStatus("loading-index");
+    setPreviewError(null);
+
+    void (async () => {
+      try {
+        const resp = await fetch(`/api/runs/${encodeURIComponent(runId)}/preview`, {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        const body: unknown = await resp.json().catch(() => null);
+        if (!resp.ok) {
+          const msg =
+            typeof (body as { error?: unknown } | null)?.error === "string"
+              ? (body as { error: string }).error
+              : `Failed to load preview (${resp.status})`;
+          throw new Error(msg);
+        }
+        const guides =
+          Array.isArray((body as PreviewIndexResponse | null)?.guides) &&
+          (body as PreviewIndexResponse).guides.length > 0
+            ? (body as PreviewIndexResponse).guides
+            : [];
+        setPreviewGuides(guides);
+        setPreviewIndex((cur) => {
+          if (guides.length === 0) return 0;
+          return Math.max(0, Math.min(cur, guides.length - 1));
+        });
+        setPreviewStatus(guides.length ? "loading-html" : "ready");
+      } catch (e) {
+        if ((e as { name?: unknown } | null)?.name === "AbortError") return;
+        setPreviewStatus("error");
+        setPreviewError(e instanceof Error ? e.message : "Failed to load preview");
+      }
+    })();
+
+    return () => controller.abort();
+  }, [step, runId, runStatus?.status]);
+
+  // When preview index or selection changes, fetch the selected HTML.
+  useEffect(() => {
+    if (step !== "done" || !runId) return;
+    if (runStatus?.status !== "completed") return;
+    const guide = previewGuides[previewIndex];
+    if (!guide) return;
+
+    const controller = new AbortController();
+    setPreviewStatus((s) => (s === "loading-index" ? s : "loading-html"));
+    setPreviewError(null);
+
+    void (async () => {
+      try {
+        const resp = await fetch(
+          `/api/runs/${encodeURIComponent(runId)}/preview?file=${encodeURIComponent(guide.outputFile)}`,
+          { cache: "no-store", signal: controller.signal }
+        );
+        const text = await resp.text();
+        if (!resp.ok) {
+          let msg = text;
+          try {
+            const parsed = JSON.parse(text) as { error?: unknown };
+            if (typeof parsed?.error === "string") msg = parsed.error;
+          } catch {
+            // ignore
+          }
+          throw new Error(msg || `Failed to load HTML (${resp.status})`);
+        }
+        setPreviewHtml(text);
+        setPreviewStatus("ready");
+      } catch (e) {
+        if ((e as { name?: unknown } | null)?.name === "AbortError") return;
+        setPreviewStatus("error");
+        setPreviewError(e instanceof Error ? e.message : "Failed to load HTML");
+      }
+    })();
+
+    return () => controller.abort();
+  }, [step, runId, runStatus?.status, previewGuides, previewIndex]);
+
+  // Reset per-run state when runId changes.
+  useEffect(() => {
+    if (!runId) return;
+    if (lastRunIdRef.current === runId) return;
+    lastRunIdRef.current = runId;
+    setIsAiEditOpen(false);
+    setAiInput("");
+    setAiMessages([]);
+    setAiError(null);
+    setIsAiApplying(false);
+    setAiProviderPref("auto");
+    setHtmlVersionsByFile({});
+    setSelectedVersionByFile({});
+  }, [runId]);
+
+  // Seed versions for the current previewed file (one timeline per outputFile).
+  useEffect(() => {
+    if (step !== "done" || !runId) return;
+    if (runStatus?.status !== "completed") return;
+    if (previewStatus !== "ready") return;
+    const guide = previewGuides[previewIndex];
+    if (!guide?.outputFile) return;
+    const file = guide.outputFile;
+    const initialId = "original";
+
+    setHtmlVersionsByFile((cur) => {
+      if (cur[file]?.length) return cur;
+      return {
+        ...cur,
+        [file]: [
+          {
+            id: initialId,
+            createdAt: Date.now(),
+            label: "Original",
+            html: previewHtml,
+            source: "original",
+          },
+        ],
+      };
+    });
+    setSelectedVersionByFile((cur) => (cur[file] ? cur : { ...cur, [file]: initialId }));
+  }, [step, runId, runStatus?.status, previewStatus, previewGuides, previewIndex, previewHtml]);
+
+  // Keep fullscreen state in sync with the browser.
+  useEffect(() => {
+    const onChange = () => {
+      const el = previewFullscreenElRef.current;
+      setIsPreviewFullscreen(!!el && document.fullscreenElement === el);
+    };
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
+
+  const togglePreviewFullscreen = useCallback(async () => {
+    const el = previewFullscreenElRef.current;
+    if (!el) return;
+    try {
+      if (document.fullscreenElement === el) {
+        await document.exitFullscreen();
+      } else {
+        await el.requestFullscreen();
+      }
+    } catch {
+      // Ignore (fullscreen can be blocked by browser policy).
+    }
+  }, []);
+
+  const currentGuide = previewGuides[previewIndex];
+  const currentFile = currentGuide?.outputFile || "";
+  const currentVersions = currentFile ? htmlVersionsByFile[currentFile] || [] : [];
+  const selectedVersionId = currentFile ? selectedVersionByFile[currentFile] : undefined;
+  const selectedVersion =
+    currentVersions.find((v) => v.id === selectedVersionId) || currentVersions.at(-1) || null;
+  const htmlToRender = selectedVersion?.html ?? previewHtml;
+  const isOriginalSelected = (selectedVersion?.id || "original") === "original";
+
+  const applyAiEdit = useCallback(async () => {
+    if (!currentGuide?.outputFile) return;
+    const instruction = aiInput.trim();
+    if (!instruction) return;
+    if (!selectedVersion) return;
+
+    const file = currentGuide.outputFile;
+    setAiError(null);
+    setIsAiApplying(true);
+    setAiInput("");
+    setAiMessages((cur) => [...cur, { role: "user", content: instruction }]);
+
+    try {
+      const resp = await fetch("/api/html-edit", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          title: currentGuide.title,
+          html: selectedVersion.html,
+          instruction,
+          provider: aiProviderPref,
+        }),
+      });
+      const body: unknown = await resp.json().catch(() => null);
+      if (!resp.ok) {
+        const msg =
+          typeof (body as { error?: unknown } | null)?.error === "string"
+            ? (body as { error: string }).error
+            : `AI edit failed (${resp.status})`;
+        throw new Error(msg);
+      }
+
+      const nextHtml =
+        typeof (body as { html?: unknown } | null)?.html === "string"
+          ? ((body as { html: string }).html as string)
+          : "";
+      const summary =
+        typeof (body as { summary?: unknown } | null)?.summary === "string"
+          ? ((body as { summary: string }).summary as string)
+          : "Applied changes";
+      const providerUsed =
+        typeof (body as { provider?: unknown } | null)?.provider === "string" &&
+        (((body as { provider: string }).provider as string) === "openai" ||
+          ((body as { provider: string }).provider as string) === "gemini")
+          ? (((body as { provider: "openai" | "gemini" }).provider as unknown) as "openai" | "gemini")
+          : null;
+
+      if (!nextHtml.trim()) throw new Error("AI returned empty HTML");
+      if (providerUsed) setAiProviderPref(providerUsed);
+
+      const id =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `v-${Date.now()}`;
+      const v: HtmlVersion = {
+        id,
+        createdAt: Date.now(),
+        label: summary.slice(0, 80),
+        instruction,
+        html: nextHtml,
+        source: "llm",
+      };
+
+      setHtmlVersionsByFile((cur) => ({
+        ...cur,
+        [file]: [...(cur[file] || []), v],
+      }));
+      setSelectedVersionByFile((cur) => ({ ...cur, [file]: id }));
+      setAiMessages((cur) => [
+        ...cur,
+        { role: "assistant", content: providerUsed ? `${summary} (${providerUsed})` : summary },
+      ]);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Failed to apply AI edit";
+      setAiError(msg);
+      setAiMessages((cur) => [...cur, { role: "assistant", content: `Error: ${msg}` }]);
+    } finally {
+      setIsAiApplying(false);
+    }
+  }, [aiInput, currentGuide, selectedVersion]);
+
   return (
-    <div className="relative rounded-xl border bg-card p-6 shadow-sm">
+    <div
+      className={cn(
+        "relative p-6",
+        step === "done"
+          ? "border-0 bg-transparent shadow-none"
+          : "rounded-xl border bg-card shadow-sm"
+      )}
+    >
       {isProcessing && (
         <div className="absolute right-4 top-4 inline-flex items-center gap-2 text-xs text-muted-foreground">
           <span
@@ -932,6 +1304,325 @@ export function RunWizard() {
                   Convert more
                 </button>
               </div>
+            </CardContent>
+          </Card>
+
+          <Card className="mt-4">
+            <CardHeader>
+              <CardTitle>Step 4: Preview</CardTitle>
+              <CardDescription>
+                Preview the generated HTML. If multiple files were uploaded, use the arrows to
+                switch between pages.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {previewStatus === "loading-index" && (
+                <div className="text-sm text-muted-foreground">Loading preview…</div>
+              )}
+              {previewStatus === "error" && previewError && (
+                <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                  {previewError}
+                </div>
+              )}
+
+              {previewGuides.length > 0 && (
+                <div className="space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="min-w-0 text-sm">
+                      <span className="font-medium">{previewGuides[previewIndex]?.title}</span>{" "}
+                      <span className="text-muted-foreground">
+                        ({previewIndex + 1}/{previewGuides.length})
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setIsAiEditOpen((v) => !v)}
+                        className={[
+                          "rounded-md border px-3 py-2 text-sm font-medium",
+                          isAiEditOpen
+                            ? "border-blue-600 bg-blue-50 text-blue-700"
+                            : "border-border bg-background hover:bg-muted",
+                        ].join(" ")}
+                        title="Open AI editor"
+                      >
+                        {isAiEditOpen ? "Close editor" : "AI edit"}
+                      </button>
+
+                      {isOriginalSelected ? (
+                        <a
+                          href={`/api/runs/${encodeURIComponent(runId || "")}/preview?file=${encodeURIComponent(
+                            previewGuides[previewIndex]?.outputFile || ""
+                          )}&download=1`}
+                          className="inline-flex items-center justify-center rounded-md bg-black p-2 text-white hover:bg-black/90"
+                          aria-label="Download this doc"
+                          title="Download this doc"
+                        >
+                          <Download className="h-4 w-4" aria-hidden="true" />
+                          <span className="sr-only">Download this doc</span>
+                        </a>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const title = currentGuide?.title || "Preview";
+                            const full = wrapPreviewDoc(title, htmlToRender);
+                            const safeName =
+                              (currentGuide?.outputFile || "guide.html").replace(
+                                /[^a-zA-Z0-9._-]/g,
+                                "_"
+                              ) || "guide.html";
+                            downloadTextFile({
+                              filename: safeName,
+                              text: full,
+                              mime: "text/html;charset=utf-8",
+                            });
+                          }}
+                          className="inline-flex items-center justify-center rounded-md bg-black p-2 text-white hover:bg-black/90"
+                          aria-label="Download this edited version"
+                          title="Download this edited version"
+                        >
+                          <Download className="h-4 w-4" aria-hidden="true" />
+                          <span className="sr-only">Download this edited version</span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => void togglePreviewFullscreen()}
+                        className="inline-flex items-center justify-center rounded-md border border-border bg-background p-2 text-foreground hover:bg-muted"
+                        aria-label={isPreviewFullscreen ? "Exit fullscreen" : "Fullscreen"}
+                        title={isPreviewFullscreen ? "Exit fullscreen" : "Fullscreen"}
+                      >
+                        {isPreviewFullscreen ? (
+                          <Minimize className="h-4 w-4" aria-hidden="true" />
+                        ) : (
+                          <Maximize className="h-4 w-4" aria-hidden="true" />
+                        )}
+                        <span className="sr-only">
+                          {isPreviewFullscreen ? "Exit fullscreen" : "Fullscreen"}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPreviewIndex((i) => Math.max(0, i - 1))}
+                        disabled={previewIndex <= 0}
+                        className={[
+                          "rounded-md border px-3 py-2 text-sm font-medium",
+                          previewIndex <= 0
+                            ? "cursor-not-allowed border-border bg-muted text-muted-foreground"
+                            : "border-border bg-background hover:bg-muted",
+                        ].join(" ")}
+                      >
+                        Prev
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setPreviewIndex((i) => Math.min(previewGuides.length - 1, i + 1))
+                        }
+                        disabled={previewIndex >= previewGuides.length - 1}
+                        className={[
+                          "rounded-md border px-3 py-2 text-sm font-medium",
+                          previewIndex >= previewGuides.length - 1
+                            ? "cursor-not-allowed border-border bg-muted text-muted-foreground"
+                            : "border-border bg-background hover:bg-muted",
+                        ].join(" ")}
+                      >
+                        Next
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="relative">
+                    <div
+                      ref={previewFullscreenElRef}
+                      className="h-[520px] overflow-hidden rounded-md border bg-background"
+                    >
+                      <iframe
+                        title={previewGuides[previewIndex]?.title || "Preview"}
+                        className="h-full w-full"
+                        sandbox=""
+                        referrerPolicy="no-referrer"
+                        srcDoc={wrapPreviewDoc(
+                          previewGuides[previewIndex]?.title || "Preview",
+                          htmlToRender
+                        )}
+                      />
+                    </div>
+
+                    {/* Lightbox editor: full-size artifact on the left + chat on the right */}
+                    {isAiEditOpen && (
+                      <>
+                        <div
+                          className="fixed inset-0 z-40 bg-black/40"
+                          onClick={() => setIsAiEditOpen(false)}
+                          aria-hidden="true"
+                        />
+                        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6">
+                          <div
+                            className="flex h-[calc(100vh-24px)] w-full max-w-6xl flex-col overflow-hidden rounded-xl border bg-background shadow-2xl sm:h-[calc(100vh-48px)]"
+                            role="dialog"
+                            aria-modal="true"
+                            aria-label="AI editor"
+                          >
+                            <div className="flex items-center justify-between border-b px-4 py-3">
+                              <div className="min-w-0">
+                                <div className="text-sm font-semibold">AI editor</div>
+                                <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                                  {currentGuide?.title || "Preview"}
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => setIsAiEditOpen(false)}
+                                className="rounded-md border border-border bg-background p-2 hover:bg-muted"
+                                aria-label="Close AI editor"
+                              >
+                                <X className="h-4 w-4" aria-hidden="true" />
+                              </button>
+                            </div>
+
+                            <div className="grid min-h-0 flex-1 grid-cols-1 gap-0 lg:grid-cols-5">
+                              {/* Left: full-size preview */}
+                              <div className="min-h-0 border-b lg:col-span-3 lg:border-b-0 lg:border-r">
+                                <div className="h-full min-h-0 p-3">
+                                  <div className="h-full overflow-hidden rounded-md border bg-background">
+                                    <iframe
+                                      title={`${currentGuide?.title || "Preview"} (Editor)`}
+                                      className="h-full w-full"
+                                      sandbox=""
+                                      referrerPolicy="no-referrer"
+                                      srcDoc={wrapPreviewDoc(
+                                        currentGuide?.title || "Preview",
+                                        htmlToRender
+                                      )}
+                                    />
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* Right: controls + chat */}
+                              <div className="flex min-h-0 flex-col lg:col-span-2">
+                                <div className="border-b px-4 py-3">
+                                  <div className="text-xs font-medium text-muted-foreground">
+                                    Version
+                                  </div>
+                                  <div className="mt-2 flex items-center gap-2">
+                                    <select
+                                      className="h-10 w-full rounded-md border border-border bg-background px-2 text-sm"
+                                      value={selectedVersion?.id || "original"}
+                                      onChange={(e) => {
+                                        const next = e.target.value;
+                                        if (!currentFile) return;
+                                        setSelectedVersionByFile((cur) => ({
+                                          ...cur,
+                                          [currentFile]: next,
+                                        }));
+                                      }}
+                                      aria-label="Select version"
+                                    >
+                                      {currentVersions.map((v, idx) => (
+                                        <option key={v.id} value={v.id}>
+                                          {idx === 0 ? "Original" : `v${idx}`} — {v.label}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                  <div className="mt-2 text-xs text-muted-foreground">
+                                    {isOriginalSelected ? "Original" : "Edited"}
+                                  </div>
+                                </div>
+
+                                <div className="flex min-h-0 flex-1 flex-col px-4 py-3">
+                                  <div className="text-xs font-medium text-muted-foreground">
+                                    Chat
+                                  </div>
+                                  {aiError && (
+                                    <div className="mt-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                                      {aiError}
+                                    </div>
+                                  )}
+                                  <div className="mt-2 min-h-0 flex-1 overflow-auto rounded-md border bg-muted/10 p-2 text-sm">
+                                    {aiMessages.length === 0 ? (
+                                      <div className="text-xs text-muted-foreground">
+                                        Ask for changes like “Add icons for key actions” or “Make this more scannable with clearer sections.”
+                                      </div>
+                                    ) : (
+                                      <div className="space-y-3">
+                                        {aiMessages.slice(-50).map((m, i) => (
+                                          <div
+                                            key={i}
+                                            className={cn(
+                                              "flex",
+                                              m.role === "user" ? "justify-end" : "justify-start"
+                                            )}
+                                          >
+                                            <div
+                                              className={cn(
+                                                "max-w-[92%] rounded-lg px-3 py-2 text-sm",
+                                                m.role === "user"
+                                                  ? "bg-blue-600 text-white"
+                                                  : "bg-background text-foreground border"
+                                              )}
+                                            >
+                                              <div className="whitespace-pre-wrap break-words">
+                                                {m.content}
+                                              </div>
+                                            </div>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+
+                                <div className="border-t px-4 py-3">
+                                  <div className="flex items-end gap-2">
+                                    <textarea
+                                      value={aiInput}
+                                      onChange={(e) => setAiInput(e.target.value)}
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter" && !e.shiftKey) {
+                                          e.preventDefault();
+                                          void applyAiEdit();
+                                        }
+                                      }}
+                                      rows={3}
+                                      placeholder="Message…"
+                                      className="w-full resize-none rounded-md border border-border bg-background p-2 text-sm"
+                                      disabled={isAiApplying}
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() => void applyAiEdit()}
+                                      disabled={isAiApplying || !aiInput.trim()}
+                                      className={[
+                                        "h-10 shrink-0 rounded-md px-3 text-sm font-medium",
+                                        isAiApplying || !aiInput.trim()
+                                          ? "cursor-not-allowed bg-muted text-muted-foreground"
+                                          : "bg-blue-600 text-white hover:bg-blue-700",
+                                      ].join(" ")}
+                                    >
+                                      {isAiApplying ? "Sending…" : "Send"}
+                                    </button>
+                                  </div>
+                                  <div className="mt-1 text-[11px] text-muted-foreground">
+                                    Enter to send • Shift+Enter for a new line
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {previewGuides.length === 0 && previewStatus !== "loading-index" && (
+                <div className="text-sm text-muted-foreground">No preview available.</div>
+              )}
             </CardContent>
           </Card>
 

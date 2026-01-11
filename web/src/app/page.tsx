@@ -6,7 +6,7 @@ export default function Home() {
       <div className="mx-auto w-full max-w-3xl">
         <div className="mb-8">
           <h1 className="text-2xl font-semibold tracking-tight">
-            Conventor by Trelent -Convert documents into clean HTML guides
+            Convert documents to HTML
           </h1>
           <p className="mt-2 text-sm text-muted-foreground">
             Upload, convert, download.

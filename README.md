@@ -1,6 +1,6 @@
 ## Trelent FDE Take-Home — Document → HTML Guide Converter
 
-This repo is a small end-to-end prototype that lets a non-technical user upload a messy folder of internal docs (PDFs, Word docs, etc.) and download a **zip of cleaned HTML “guides”**. It’s intentionally “scrappy but real”: it runs as a **repeatable background pipeline** (not one big blocking request), records run status/progress, and includes multiple fallbacks so the demo still works even if external APIs fail.
+This repo is a small end-to-end prototype that lets a non-technical user upload a messy folder of internal docs (PDFs, Word docs, etc.) and download a **zip of cleaned HTML “guides”**. It runs as a **repeatable background pipeline** (not one big blocking request), records run status/progress, and includes multiple fallbacks so the demo still works even if external APIs fail.
 
 ### What I built
 

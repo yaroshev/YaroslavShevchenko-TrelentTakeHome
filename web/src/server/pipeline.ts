@@ -391,7 +391,19 @@ async function toMarkdown(filePath: string, log?: Logger) {
   }
 }
 
-async function rewriteToHtmlFragment(title: string, markdown: string, log?: Logger) {
+async function rewriteToHtmlFragment(
+  title: string,
+  markdown: string,
+  log?: Logger,
+  opts?: {
+    preferredPrimary?: "openai" | "gemini";
+    /**
+     * Called once the primary provider fails (after its internal retries),
+     * so the caller can make fallback "sticky" for the remainder of a run.
+     */
+    onPrimaryFailure?: (info: { provider: "openai" | "gemini"; error: unknown }) => void;
+  }
+) {
   const localMarkdownToHtml = () => {
     const body = String(marked.parse(markdown || "")) || "";
     return normalizeHtmlFragment(
@@ -713,7 +725,13 @@ ${body}
   }
 
   // Prefer OpenAI as primary when configured, with Gemini as fallback (or vice versa).
-  const primary: "openai" | "gemini" = hasOpenAi ? "openai" : "gemini";
+  // Optionally allow the caller to make the preference "sticky" for a run.
+  const defaultPrimary: "openai" | "gemini" = hasOpenAi ? "openai" : "gemini";
+  const preferred = opts?.preferredPrimary;
+  const primary: "openai" | "gemini" =
+    preferred && ((preferred === "openai" && hasOpenAi) || (preferred === "gemini" && hasGemini))
+      ? preferred
+      : defaultPrimary;
   const fallback: "openai" | "gemini" = primary === "openai" ? "gemini" : "openai";
 
   const callProvider = async (provider: "openai" | "gemini", apiType: "primary" | "fallback") => {
@@ -731,6 +749,7 @@ ${body}
     return await callProvider(primary, "primary");
   } catch (e) {
     primaryErr = e;
+    opts?.onPrimaryFailure?.({ provider: primary, error: e });
     console.error(`\n[API Call] ========================================`);
     console.error(`[API Call] PRIMARY API (${primary.toUpperCase()}) FAILED after 3 attempts`);
     console.error(`[API Call] Switching to FALLBACK API: ${fallback.toUpperCase()}`);
@@ -852,6 +871,13 @@ export async function runPipeline(
 
   const per = 80 / relFiles.length;
   let idx = 0;
+
+  // Sticky LLM preference: if the primary provider fails once (e.g. broken OpenAI key),
+  // keep using the fallback for the rest of this run rather than "cycling back" per file.
+  const hasOpenAi = !!process.env.OPENAI_API_KEY;
+  const hasGemini = !!(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
+  let preferredRewriteProvider: "openai" | "gemini" | null =
+    hasOpenAi ? "openai" : hasGemini ? "gemini" : null;
   const usedOutputNames = new Map<string, number>();
   const manifest: Array<{
     sourcePath: string;
@@ -906,7 +932,20 @@ export async function runPipeline(
     try {
       const md = await toMarkdown(inputPath, fileLog);
       fileLog.info("file: markdown ready", { markdownChars: md.length });
-      const html = await rewriteToHtmlFragment(title, md, fileLog);
+      const html = await rewriteToHtmlFragment(title, md, fileLog, {
+        preferredPrimary: preferredRewriteProvider || undefined,
+        onPrimaryFailure: ({ provider, error }) => {
+          // If both are available, flip preference so we don't keep retrying the failing one.
+          if (!hasOpenAi || !hasGemini) return;
+          if (preferredRewriteProvider !== provider) return;
+          preferredRewriteProvider = provider === "openai" ? "gemini" : "openai";
+          fileLog.warn("rewrite: primary failed; making fallback sticky for remainder of run", {
+            failedProvider: provider,
+            nextPreferred: preferredRewriteProvider,
+            error: errorToObject(error),
+          });
+        },
+      });
       fileLog.info("file: html ready", { htmlChars: html.length });
       await fs.writeFile(path.join(guidesDir, outName), html, "utf8");
       manifest.push({
