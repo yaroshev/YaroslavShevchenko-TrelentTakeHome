@@ -231,6 +231,10 @@ export function RunWizard() {
   );
 
   const canConvert = !!uploadId && !isUploading;
+  const isProcessing =
+    step === "convert" &&
+    !!runStatus &&
+    (runStatus.status === "queued" || runStatus.status === "running");
 
   const resetWizard = useCallback(() => {
     setStep("upload");
@@ -664,7 +668,16 @@ export function RunWizard() {
   }, [step, runId, fetchReviewerLog]);
 
   return (
-    <div className="rounded-xl border bg-card p-6 shadow-sm">
+    <div className="relative rounded-xl border bg-card p-6 shadow-sm">
+      {isProcessing && (
+        <div className="absolute right-4 top-4 inline-flex items-center gap-2 text-xs text-muted-foreground">
+          <span
+            className="h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground"
+            aria-hidden="true"
+          />
+          <span>Working…</span>
+        </div>
+      )}
       {step === "upload" && (
         <div>
           <div className="flex items-start justify-between gap-4">
@@ -996,7 +1009,6 @@ export function RunWizard() {
             }
           }}
           onClose={() => {
-            resetWizard();
             setShowErrorLightbox(false);
             setErrorMessage(null);
           }}
